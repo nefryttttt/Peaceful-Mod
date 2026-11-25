@@ -8,11 +8,8 @@
 
 using namespace geode::prelude;
 
-// Реальные глобальные настройки хаоса, которые используются в игре
-bool g_chaosEnabled  = false;   // хаос выключен по умолчанию
-bool g_chaosUnlocked = false;   // разблокирован ли хаос (после 2 смертей)
-int  g_totalDeaths   = 0;       // счётчик смертей за сессию мода
-
+// Изначально мод выключен
+bool g_chaosEnabled = false;
 int g_chanceZoom = 20;
 int g_chanceSound = 50;
 int g_chanceJump = 25;
@@ -22,7 +19,6 @@ int g_chanceWarp = 35;
 int g_chanceRotate = 25;
 int g_chanceFreeze = 5;
 
-// Класс меню настроек хаоса (Popup) с кнопкой Save
 class ChaosSettingsPopup : public Popup {
 protected:
     TextInput* m_zoomInput = nullptr;
@@ -175,7 +171,6 @@ public:
     }
 };
 
-// Открытие по двойному нажатию P в Главном меню
 class $modify(ChaosMenuLayer, MenuLayer) {
     struct Fields {
         bool lastPState = false;
@@ -185,6 +180,8 @@ class $modify(ChaosMenuLayer, MenuLayer) {
 
     bool init() {
         if (!MenuLayer::init()) return false;
+        g_chaosEnabled = false;
+        CCScheduler::get()->setTimeScale(1.0f);
         this->schedule(schedule_selector(ChaosMenuLayer::checkKeys));
         return true;
     }
@@ -211,7 +208,6 @@ class $modify(ChaosMenuLayer, MenuLayer) {
     }
 };
 
-// Логика хаоса и обработка в игре
 class $modify(ChaosPlayLayer, PlayLayer) {
     struct Fields {
         CCLayerColor* blackScreen = nullptr;
@@ -252,41 +248,121 @@ class $modify(ChaosPlayLayer, PlayLayer) {
         bool lastPState = false;
         float pDoublePressTimer = 0.0f;
         int pPressCount = 0;
+
+        int realDeaths = 0;
+        bool chaosActive = false;
+        float enterGraceTimer = 0.0f;
     };
 
-     void onEnter() override {
-        // Обязательно вызываем родительский метод, чтобы уровень загрузился нормально
-        PlayLayer::onEnter();
+    void ensureOverlays() {
+        auto winSize = CCDirector::get()->getWinSize();
 
-        // Дальше идет код, который раньше был в init:
-        m_fields->blackScreen = CCLayerColor::create(ccc4(0, 0, 0, 255));
-        m_fields->blackScreen->setOpacity(0);
-        m_fields->blackScreen->setZOrder(99999);
-        this->addChild(m_fields->blackScreen);
+        if (!m_fields->blackScreen) {
+            m_fields->blackScreen = CCLayerColor::create(ccc4(0, 0, 0, 255), winSize.width * 2.0f, winSize.height * 2.0f);
+            m_fields->blackScreen->setPosition({-winSize.width * 0.5f, -winSize.height * 0.5f});
+            m_fields->blackScreen->setOpacity(0);
+            m_fields->blackScreen->setZOrder(99999);
+            this->addChild(m_fields->blackScreen);
+        }
 
-        m_fields->exclamationLabel = CCLabelBMFont::create("!", "goldFont.fnt");
-        m_fields->exclamationLabel->setOpacity(0);
-        m_fields->exclamationLabel->setScale(1.2f);
-        m_fields->exclamationLabel->setZOrder(9998);
+        if (!m_fields->exclamationLabel) {
+            m_fields->exclamationLabel = CCLabelBMFont::create("!", "goldFont.fnt");
+            m_fields->exclamationLabel->setOpacity(0);
+            m_fields->exclamationLabel->setScale(1.2f);
+            m_fields->exclamationLabel->setZOrder(9998);
 
-        if (m_objectLayer) {
-            m_objectLayer->addChild(m_fields->exclamationLabel);
-        } else {
-            this->addChild(m_fields->exclamationLabel);
+            if (m_objectLayer) {
+                m_objectLayer->addChild(m_fields->exclamationLabel);
+            } else {
+                this->addChild(m_fields->exclamationLabel);
+            }
         }
     }
 
-    // Считаем смерти и включаем хаос после 2-й смерти
+    void showBlackScreen(float duration) {
+        ensureOverlays();
+        if (!m_fields->blackScreen) return;
+        m_fields->blackScreen->setColor({0, 0, 0});
+        m_fields->blackScreen->setOpacity(255);
+        m_fields->blackScreenTimer = duration;
+    }
+
+    void hideBlackScreen() {
+        if (!m_fields->blackScreen) return;
+        m_fields->blackScreen->setOpacity(0);
+        m_fields->blackScreenTimer = 0.0f;
+    }
+
+    void resetChaosEffects() {
+        hideBlackScreen();
+        if (m_fields->exclamationLabel) {
+            m_fields->exclamationLabel->setOpacity(0);
+        }
+        this->setScale(1.0f);
+        this->setScaleX(1.0f);
+        this->setRotation(0.0f);
+
+        m_fields->isHardFrozen = false;
+        m_fields->isZooming = false;
+        m_fields->isFlipped = false;
+        m_fields->isRotating = false;
+        m_fields->blackScreenTimer = 0.0f;
+        m_fields->exclamationTimer = 0.0f;
+        m_fields->timeWarpTimer = 0.0f;
+        m_fields->flipTimer = 0.0f;
+        m_fields->rotationTimer = 0.0f;
+        m_fields->zoomTimer = 0.0f;
+
+        CCScheduler::get()->setTimeScale(1.0f);
+    }
+
+    void setChaosState(bool enabled, bool showOffToast) {
+        bool wasEnabled = m_fields->chaosActive && g_chaosEnabled;
+        m_fields->chaosActive = enabled;
+        g_chaosEnabled = enabled;
+
+        if (!enabled) {
+            resetChaosEffects();
+            if (showOffToast && wasEnabled) {
+                Notification::create("Chaos Mode: OFF", NotificationIcon::Success, 0.6f)->show();
+            }
+        } else {
+            m_fields->jumpTimer = 0.8f;
+            m_fields->flashTimer = 1.5f;
+            m_fields->soundTimer = 1.0f;
+            m_fields->flipCooldown = 2.5f;
+            m_fields->timeWarpCooldown = 3.5f;
+            m_fields->rotationCooldown = 3.5f;
+            m_fields->zoomCooldown = 2.5f;
+            m_fields->freezeCooldown = 9.0f;
+        }
+    }
+
+    void onEnter() override {
+        PlayLayer::onEnter();
+        m_fields->realDeaths = 0;
+        m_fields->enterGraceTimer = 1.0f;
+        setChaosState(false, false);
+        ensureOverlays();
+    }
+
+    void onExit() override {
+        PlayLayer::onExit();
+        setChaosState(false, false);
+        m_fields->blackScreen = nullptr;
+        m_fields->exclamationLabel = nullptr;
+    }
+
     void destroyPlayer(PlayerObject* player, GameObject* object) override {
         PlayLayer::destroyPlayer(player, object);
 
-        if (!g_chaosUnlocked) {
-            g_totalDeaths++;
-            if (g_totalDeaths >= 2) {
-                g_chaosUnlocked = true;
-                g_chaosEnabled = true;
-                Notification::create("Chaos Mode: ON", NotificationIcon::Warning, 0.6f)->show();
-            }
+        if (m_fields->enterGraceTimer > 0.0f || !m_player1 || m_hasCompletedLevel) {
+            return;
+        }
+
+        m_fields->realDeaths++;
+        if (m_fields->realDeaths >= 2 && !m_fields->chaosActive) {
+            setChaosState(true, false);
         }
     }
 
@@ -294,11 +370,21 @@ class $modify(ChaosPlayLayer, PlayLayer) {
         PlayLayer::postUpdate(dt);
         if (!m_player1 || m_hasCompletedLevel) return;
 
+        float realDt = (dt > 0.0f) ? dt : (1.0f / 60.0f);
+        float currentScale = CCScheduler::get()->getTimeScale();
+        if (currentScale > 0.0001f && currentScale != 1.0f) {
+            realDt = dt / currentScale;
+        }
+
+        if (m_fields->enterGraceTimer > 0.0f) {
+            m_fields->enterGraceTimer -= realDt;
+            if (m_fields->enterGraceTimer < 0.0f) m_fields->enterGraceTimer = 0.0f;
+        }
+
         bool currentPState = (GetAsyncKeyState('P') & 0x8000) != 0;
         if (currentPState && !m_fields->lastPState) {
             m_fields->pPressCount++;
             m_fields->pDoublePressTimer = 0.4f;
-
             if (m_fields->pPressCount >= 2) {
                 m_fields->pPressCount = 0;
                 this->pauseGame(false);
@@ -306,63 +392,38 @@ class $modify(ChaosPlayLayer, PlayLayer) {
             }
         }
         m_fields->lastPState = currentPState;
-
         if (m_fields->pDoublePressTimer > 0.0f) {
-            m_fields->pDoublePressTimer -= dt;
-            if (m_fields->pDoublePressTimer <= 0.0f) {
-                m_fields->pPressCount = 0;
-            }
+            m_fields->pDoublePressTimer -= realDt;
+            if (m_fields->pDoublePressTimer <= 0.0f) m_fields->pPressCount = 0;
         }
 
         bool currentShiftState = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
         if (currentShiftState && !m_fields->lastShiftState) {
             m_fields->shiftPressCount++;
             m_fields->shiftResetTimer = 0.6f;
-
             if (m_fields->shiftPressCount >= 3) {
                 m_fields->shiftPressCount = 0;
-                g_chaosEnabled = !g_chaosEnabled;
-
-                if (g_chaosEnabled) {
-                    Notification::create("Chaos Mode: ON", NotificationIcon::Warning, 0.6f)->show();
-                } else {
-                    if (m_fields->blackScreen) {
-                        m_fields->blackScreen->setOpacity(0);
-                        m_fields->blackScreen->setBlendFunc({GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA});
-                    }
-                    if (m_fields->exclamationLabel) {
-                        m_fields->exclamationLabel->setOpacity(0);
-                    }
-                    this->setScale(1.0f);
-                    this->setScaleX(1.0f);
-                    this->setRotation(0.0f);
-                    CCScheduler::get()->setTimeScale(1.0f);
-                    m_fields->isHardFrozen = false;
-                    m_fields->isZooming = false;
-                    m_fields->isFlipped = false;
-                    m_fields->isRotating = false;
-
-                    auto fmod = FMODAudioEngine::get();
-                    if (fmod && fmod->m_backgroundMusicChannel) {
-                        fmod->m_backgroundMusicChannel->setPaused(false);
-                        fmod->m_backgroundMusicChannel->setPitch(1.0f);
-                    }
-
-                    Notification::create("Chaos Mode: OFF", NotificationIcon::Success, 0.6f)->show();
-                }
+                setChaosState(!m_fields->chaosActive, true);
             }
         }
         m_fields->lastShiftState = currentShiftState;
-
         if (m_fields->shiftResetTimer > 0.0f) {
-            m_fields->shiftResetTimer -= dt;
-            if (m_fields->shiftResetTimer <= 0.0f) {
-                m_fields->shiftPressCount = 0;
+            m_fields->shiftResetTimer -= realDt;
+            if (m_fields->shiftResetTimer <= 0.0f) m_fields->shiftPressCount = 0;
+        }
+
+        if (!g_chaosEnabled || !m_fields->chaosActive) {
+            if (m_fields->exclamationLabel && m_fields->exclamationLabel->getOpacity() > 0) {
+                m_fields->exclamationLabel->setOpacity(0);
             }
+            if (m_fields->blackScreen && m_fields->blackScreen->getOpacity() > 0) {
+                hideBlackScreen();
+            }
+            return;
         }
 
         if (m_fields->exclamationTimer > 0.0f) {
-            m_fields->exclamationTimer -= dt;
+            m_fields->exclamationTimer -= realDt;
             if (m_player1 && m_fields->exclamationLabel) {
                 m_fields->exclamationLabel->setPosition(m_player1->getPosition() + ccp(0.0f, 40.0f));
                 float progress = m_fields->exclamationTimer / m_fields->exclamationMaxTime;
@@ -370,38 +431,26 @@ class $modify(ChaosPlayLayer, PlayLayer) {
             }
         }
 
-        if (!g_chaosEnabled) return;
-
         if (m_fields->isHardFrozen) {
             auto now = std::chrono::steady_clock::now();
             std::chrono::duration<float> elapsed = now - m_fields->freezeStartTime;
             if (elapsed.count() >= m_fields->freezeDurationSeconds) {
                 m_fields->isHardFrozen = false;
+                hideBlackScreen();
                 CCScheduler::get()->setTimeScale(1.0f);
-
-                if (m_fields->blackScreen) {
-                    m_fields->blackScreen->setOpacity(0);
-                    m_fields->blackScreen->setBlendFunc({GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA});
-                }
-
-                auto fmod = FMODAudioEngine::get();
-                if (fmod && fmod->m_backgroundMusicChannel) {
-                    fmod->m_backgroundMusicChannel->setPaused(false);
-                    fmod->m_backgroundMusicChannel->setPitch(1.0f);
-                }
             }
             return;
         }
 
         if (m_fields->blackScreen && m_fields->blackScreen->getOpacity() > 0) {
-            m_fields->blackScreenTimer -= dt;
+            m_fields->blackScreenTimer -= realDt;
             if (m_fields->blackScreenTimer <= 0.0f) {
-                m_fields->blackScreen->setOpacity(0);
+                hideBlackScreen();
             }
         }
 
         if (m_fields->isFlipped) {
-            m_fields->flipTimer -= dt;
+            m_fields->flipTimer -= realDt;
             if (m_fields->flipTimer <= 0.0f) {
                 this->setScaleX(1.0f);
                 m_fields->isFlipped = false;
@@ -409,18 +458,14 @@ class $modify(ChaosPlayLayer, PlayLayer) {
         }
 
         if (m_fields->timeWarpTimer > 0.0f) {
-            m_fields->timeWarpTimer -= dt;
+            m_fields->timeWarpTimer -= realDt;
             if (m_fields->timeWarpTimer <= 0.0f) {
                 CCScheduler::get()->setTimeScale(1.0f);
-                auto fmod = FMODAudioEngine::get();
-                if (fmod && fmod->m_backgroundMusicChannel) {
-                    fmod->m_backgroundMusicChannel->setPitch(1.0f);
-                }
             }
         }
 
         if (m_fields->isRotating) {
-            m_fields->rotationTimer -= dt;
+            m_fields->rotationTimer -= realDt;
             if (m_fields->rotationTimer <= 0.0f) {
                 this->setRotation(0.0f);
                 m_fields->isRotating = false;
@@ -428,36 +473,29 @@ class $modify(ChaosPlayLayer, PlayLayer) {
         }
 
         if (m_fields->isZooming) {
-            m_fields->zoomTimer -= dt;
+            m_fields->zoomTimer -= realDt;
             if (m_fields->zoomTimer <= 0.0f) {
                 this->setScale(1.0f);
                 m_fields->isZooming = false;
             }
         }
 
-        // События
-        m_fields->freezeCooldown -= dt;
+        // --- СОБЫТИЯ ХАОСА ---
+
+        m_fields->freezeCooldown -= realDt;
         if (m_fields->freezeCooldown <= 0.0f && (rand() % 100) < g_chanceFreeze) {
             m_fields->isHardFrozen = true;
             m_fields->freezeStartTime = std::chrono::steady_clock::now();
             m_fields->freezeDurationSeconds = 2.0f + static_cast<float>(rand() % 15) / 10.0f;
+
             CCScheduler::get()->setTimeScale(0.02f);
+            showBlackScreen(m_fields->freezeDurationSeconds);
 
-            if (m_fields->blackScreen) {
-                m_fields->blackScreen->setBlendFunc({GL_DST_COLOR, GL_ZERO});
-                m_fields->blackScreen->setColor({140, 140, 140});
-                m_fields->blackScreen->setOpacity(255);
-            }
-
-            auto fmod = FMODAudioEngine::get();
-            if (fmod && fmod->m_backgroundMusicChannel) {
-                fmod->m_backgroundMusicChannel->setPaused(true);
-            }
             m_fields->freezeCooldown = 10.0f + static_cast<float>(rand() % 10);
             return;
         }
 
-        m_fields->jumpTimer -= dt;
+        m_fields->jumpTimer -= realDt;
         if (m_fields->jumpTimer <= 0.0f) {
             m_fields->jumpTimer = 0.6f + static_cast<float>(rand() % 20) / 10.0f;
             if ((rand() % 100) < g_chanceJump) {
@@ -466,20 +504,16 @@ class $modify(ChaosPlayLayer, PlayLayer) {
             }
         }
 
-        m_fields->flashTimer -= dt;
+        m_fields->flashTimer -= realDt;
         if (m_fields->flashTimer <= 0.0f) {
             m_fields->flashTimer = 1.2f + static_cast<float>(rand() % 30) / 10.0f;
             if ((rand() % 100) < g_chanceFlash) {
-                if (m_fields->blackScreen) {
-                    m_fields->blackScreen->setBlendFunc({GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA});
-                    m_fields->blackScreen->setColor({0, 0, 0});
-                    m_fields->blackScreen->setOpacity(255);
-                    m_fields->blackScreenTimer = 0.5f + static_cast<float>(rand() % 10) / 10.0f;
-                }
+                float duration = 0.5f + static_cast<float>(rand() % 10) / 10.0f;
+                showBlackScreen(duration);
             }
         }
 
-        m_fields->soundTimer -= dt;
+        m_fields->soundTimer -= realDt;
         if (m_fields->soundTimer <= 0.0f) {
             m_fields->soundTimer = 0.8f + static_cast<float>(rand() % 20) / 10.0f;
             if ((rand() % 100) < g_chanceSound) {
@@ -494,7 +528,7 @@ class $modify(ChaosPlayLayer, PlayLayer) {
             }
         }
 
-        m_fields->flipCooldown -= dt;
+        m_fields->flipCooldown -= realDt;
         if (m_fields->flipCooldown <= 0.0f && !m_fields->isFlipped) {
             m_fields->flipCooldown = 2.0f + static_cast<float>(rand() % 30) / 10.0f;
             if ((rand() % 100) < g_chanceFlip) {
@@ -504,7 +538,7 @@ class $modify(ChaosPlayLayer, PlayLayer) {
             }
         }
 
-        m_fields->timeWarpCooldown -= dt;
+        m_fields->timeWarpCooldown -= realDt;
         if (m_fields->timeWarpCooldown <= 0.0f && m_fields->timeWarpTimer <= 0.0f) {
             m_fields->timeWarpCooldown = 3.0f + static_cast<float>(rand() % 40) / 10.0f;
             if ((rand() % 100) < g_chanceWarp) {
@@ -512,16 +546,11 @@ class $modify(ChaosPlayLayer, PlayLayer) {
                 float chosenSpeed = warpSpeeds[rand() % 5];
 
                 CCScheduler::get()->setTimeScale(chosenSpeed);
-                auto fmod = FMODAudioEngine::get();
-                if (fmod && fmod->m_backgroundMusicChannel) {
-                    fmod->m_backgroundMusicChannel->setPitch(chosenSpeed);
-                }
-
                 m_fields->timeWarpTimer = 1.5f + static_cast<float>(rand() % 15) / 10.0f;
             }
         }
 
-        m_fields->rotationCooldown -= dt;
+        m_fields->rotationCooldown -= realDt;
         if (m_fields->rotationCooldown <= 0.0f && !m_fields->isRotating) {
             m_fields->rotationCooldown = 3.0f + static_cast<float>(rand() % 40) / 10.0f;
             if ((rand() % 100) < g_chanceRotate) {
@@ -533,7 +562,7 @@ class $modify(ChaosPlayLayer, PlayLayer) {
             }
         }
 
-        m_fields->zoomCooldown -= dt;
+        m_fields->zoomCooldown -= realDt;
         if (m_fields->zoomCooldown <= 0.0f && !m_fields->isZooming) {
             m_fields->zoomCooldown = 2.0f + static_cast<float>(rand() % 25) / 10.0f;
             if ((rand() % 100) < g_chanceZoom) {
